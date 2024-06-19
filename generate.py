@@ -214,7 +214,7 @@ def main(args):
         print("GT distribution: {}".format(Counter(all_gts)))
                     
 if __name__ == "__main__":
-    
-    from configs.generate_configs import * 
-    
+
+    from configs.generate_configs import *
+
     main(args)
