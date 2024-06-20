@@ -14,18 +14,45 @@ os.makedirs(results_dir, exist_ok=True)
 
 # 读取文本文件内容的函数
 def read_text_file(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        return file.read()
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
+    except Exception as e:
+        print(f"Error reading text file {file_path}: {e}")
+        return None
 
 # 读取JSON文件内容的函数
 def read_json_file(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        return json.load(file)
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error in file {file_path}: {e}")
+        return None
+    except Exception as e:
+        print(f"Error reading JSON file {file_path}: {e}")
+        return None
+
+# 读取JSON Lines文件内容的函数
+def read_json_lines_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return [json.loads(line) for line in file]
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error in file {file_path}: {e}")
+        return None
+    except Exception as e:
+        print(f"Error reading JSON Lines file {file_path}: {e}")
+        return None
 
 # 读取PKL文件内容的函数
 def read_pkl_file(file_path):
-    with open(file_path, 'rb') as file:
-        return pickle.load(file)
+    try:
+        with open(file_path, 'rb') as file:
+            return pickle.load(file)
+    except Exception as e:
+        print(f"Error reading PKL file {file_path}: {e}")
+        return None
 
 # 准备存储数据集的列表
 dataset = []
@@ -36,6 +63,8 @@ for code_file in os.listdir(codes_dir):
 
     if os.path.exists(code_path):
         code_data = read_json_file(code_path)
+        if code_data is None:
+            continue
 
         for question_number, code_info in code_data.items():
             question_number_padded = question_number.zfill(4)  # 保证题号是四位数
@@ -62,9 +91,17 @@ for code_file in os.listdir(codes_dir):
             if all(files_exist.values()):
                 instruction = read_text_file(question_path)
                 solutions = read_json_file(solutions_path)
+                if solutions:
+                    solution = solutions[0]  # 只选择第一个解决方案
+                else:
+                    solution = None
+
                 input_output = read_json_file(input_output_path)
                 pkl_data = read_pkl_file(pkl_file_path)
-                evaluate_data = read_json_file(evaluate_file_path)
+                evaluate_data = read_json_lines_file(evaluate_file_path)
+
+                if None in [instruction, solution, input_output, pkl_data, evaluate_data]:
+                    continue
 
                 code_list = code_info["code"]
                 generate_code = "\n".join(code_list)
@@ -73,7 +110,7 @@ for code_file in os.listdir(codes_dir):
                 outputs = input_output.get("outputs", [])
                 results = pkl_data.get(int(question_number), {}).get("results", [])
                 errors = pkl_data.get(int(question_number), {}).get("errors", [])
-                evaluation = evaluate_data.get("evaluation", "")
+                evaluation = evaluate_data[0].get("evaluation", "") if evaluate_data else ""
 
                 # 确保所有对象都可序列化
                 def make_serializable(obj):
@@ -95,7 +132,7 @@ for code_file in os.listdir(codes_dir):
                 # 构建数据条目
                 data_entry = {
                     "instruction": make_serializable(instruction),
-                    "solutions": make_serializable(solutions),
+                    "solutions": make_serializable(solution),
                     "generate_code": make_serializable(generate_code),
                     "io_results": io_re_list,
                     "evaluate": make_serializable(evaluation)

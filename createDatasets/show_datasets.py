@@ -1,7 +1,7 @@
 import json
 
 # 指定数据集文件路径
-dataset_path = "/data/coding/CodeRL/outputs/test_datasets/cleaned_dataset.jsonl"
+dataset_path = "/data/coding/CodeRL/outputs/test_datasets/sft_dataset.jsonl"
 
 def read_jsonl_file(file_path):
     data = []
@@ -18,3 +18,4 @@ def display_dataset(data, num_entries=5):
 dataset = read_jsonl_file(dataset_path)
 
 display_dataset(dataset, num_entries=5)
+print(len(dataset))
