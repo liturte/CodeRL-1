@@ -1,12 +1,25 @@
+import os
+# 设置要使用的GPU编号
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5,6,7"  # 排除第0号GPU
+import torch
 from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
 from peft import LoraConfig, get_peft_model
-import json
+from torch.utils.data import DataLoader, RandomSampler
+from torch.optim import AdamW
+
+
+
+# 检查可用的GPU数量
+num_gpus = torch.cuda.device_count()
+print("Number of GPUs available:", num_gpus)
+for i in range(num_gpus):
+    print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
 
 # 定义数据集路径
 sft_dataset_path = "/data/coding/CodeRL/outputs/test_datasets/sft_dataset.jsonl"
 
-# 加载转换后的数据集
+# 加载转换后的SFT数据集
 dataset = load_dataset("json", data_files=sft_dataset_path, split='train')
 
 # 打印数据集中的一个示例，检查数据结构
@@ -35,71 +48,45 @@ model = AutoModelForCausalLM.from_pretrained(local_model_path)
 lora_config = LoraConfig(
     r=8,
     lora_alpha=16,
-    target_modules=["q_proj", "k_proj"],
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
     lora_dropout=0.05,
     bias="none"
 )
 model = get_peft_model(model, lora_config)
 
-# 分块处理函数
-def chunk_sequence(sequence, chunk_size):
-    """将序列分成多个块，每个块的长度不超过 chunk_size。"""
-    return [sequence[i:i + chunk_size] for i in range(0, len(sequence), chunk_size)]
+# 将模型移动到指定的GPU
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # 指定使用第0号GPU（第1号物理GPU）
+model.to(device)
 
 # 数据预处理函数
 def preprocess_function(examples):
-    inputs = []
-    targets = []
+    instructions = examples['instruction']
+    solutions = examples['solution']
 
-    contexts = examples['context']
-    qa_pairs_list = examples['qa_pairs']
+    model_inputs = tokenizer(instructions, max_length=512, truncation=True, padding="max_length")
+    labels = tokenizer(solutions, max_length=512, truncation=True, padding="max_length")["input_ids"]
 
-    for i in range(len(contexts)):
-        context = contexts[i]
-        qa_pairs = qa_pairs_list[i]
-        for qa in qa_pairs:
-            question = qa['question']
-            answer = qa['answer']
-            full_input = f"{context} Question: {question}"
-            full_target = answer
+    # 设置标签，将填充的部分设为-100以便在计算损失时忽略它们
+    for i in range(len(labels)):
+        labels[i] = [(l if l != tokenizer.pad_token_id else -100) for l in labels[i]]
 
-            # 将长序列分成多个块
-            input_chunks = chunk_sequence(full_input, 512)
-            target_chunks = chunk_sequence(full_target, 512)
-
-            # 过滤掉空的块
-            input_chunks = [chunk for chunk in input_chunks if chunk]
-            target_chunks = [chunk for chunk in target_chunks if chunk]
-
-            # 调试信息：打印分块后的长度
-            print(f"Input chunks: {len(input_chunks)}, Target chunks: {len(target_chunks)}")
-
-            inputs.extend(input_chunks)
-            targets.extend(target_chunks)
-
-    model_inputs = tokenizer(inputs, max_length=512, truncation=True, padding="max_length")
-    labels = tokenizer(targets, max_length=512, truncation=True, padding="max_length")["input_ids"]
-
-    # 确保 model_inputs 和 labels 长度一致
-    if len(model_inputs["input_ids"]) == len(labels):
-        model_inputs["labels"] = labels
-    else:
-        # 处理长度不一致的情况
-        min_length = min(len(model_inputs["input_ids"]), len(labels))
-        model_inputs["input_ids"] = model_inputs["input_ids"][:min_length]
-        model_inputs["attention_mask"] = model_inputs["attention_mask"][:min_length]
-        model_inputs["labels"] = labels[:min_length]
-
-    # 调试信息：打印最终的输入和标签长度
-    print(f"Processed inputs: {len(model_inputs['input_ids'])}, Processed labels: {len(model_inputs['labels'])}")
+    model_inputs["labels"] = labels
 
     return model_inputs
 
 # 应用数据预处理
-try:
-    tokenized_datasets = datasets.map(preprocess_function, batched=True, remove_columns=["context", "qa_pairs"])
-except Exception as e:
-    print(f"Error during preprocessing: {e}")
+tokenized_datasets = datasets.map(preprocess_function, batched=True, remove_columns=["instruction", "solution"])
+
+# 创建数据加载器
+train_sampler = RandomSampler(tokenized_datasets['train'])
+train_dataloader = DataLoader(tokenized_datasets['train'], batch_size=1, sampler=train_sampler)
+
+eval_sampler = RandomSampler(tokenized_datasets['test'])
+eval_dataloader = DataLoader(tokenized_datasets['test'], batch_size=1, sampler=eval_sampler)
+
+# 定义优化器
+optimizer = AdamW(model.parameters(), lr=2e-4)
 
 # 定义训练参数
 training_args = TrainingArguments(
@@ -116,23 +103,44 @@ training_args = TrainingArguments(
 )
 
 # 微调模型
-try:
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets['train'],
-        eval_dataset=tokenized_datasets['test'],
-    )
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets['train'],
+    eval_dataset=tokenized_datasets['test'],
+    optimizers=(optimizer, None),
+)
 
-    trainer.train()
-except Exception as e:
-    print(f"Error during training: {e}")
+trainer.train()
 
-# 保存微调后的模型
-try:
-    model.save_pretrained("/data/coding/CodeRL/Fine_tuning_result")
-    tokenizer.save_pretrained("/data/coding/CodeRL/Fine_tuning_result")
+# 保存微调后的模型权重和tokenizer
+model.save_pretrained("/data/coding/CodeRL/Fine_tuning_result")
+tokenizer.save_pretrained("/data/coding/CodeRL/Fine_tuning_result")
 
-    print("微调完成，模型已保存。")
-except Exception as e:
-    print(f"Error during model saving: {e}")
+print("微调完成，模型已保存。")
+
+# 加载微调后的模型和tokenizer
+fine_tuned_model_path = "/data/coding/CodeRL/Fine_tuning_result"
+model = AutoModelForCausalLM.from_pretrained(fine_tuned_model_path)
+tokenizer = AutoTokenizer.from_pretrained(fine_tuned_model_path)
+
+# 将模型移动到指定的GPU
+model.to(device)
+
+# 简单测试
+def generate_code(instruction):
+    inputs = tokenizer(f"Instruction: {instruction}", return_tensors="pt")
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+    outputs = model.generate(**inputs, max_length=512, num_return_sequences=1)
+    generated_code = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return generated_code
+
+# 测试一些样例
+test_instructions = [
+    "Write a function to add two numbers.",
+    "Create a class for a simple calculator.",
+]
+
+for instruction in test_instructions:
+    print(f"Instruction: {instruction}")
+    print("Generated Code:", generate_code(instruction))
