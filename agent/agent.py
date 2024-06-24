@@ -79,7 +79,7 @@ def main():
             print(f"Generated code for task {task_id} (initial):")
             print(generated_code)
             print("\n")
-
+f
             # Step 2: 使用ChatGPT评估生成的代码
             try:
                 feedback = evaluate_code_with_chatgpt(prompt, generated_code)
